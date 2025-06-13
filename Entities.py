@@ -120,7 +120,7 @@ class Cloth:
                 y = 0 # Initial height
                 z = j * self.dz - self.length / 2  
                 
-                # Create point mass
+                # Create point mass 
                 point_mass = PointMass(x, y, z, self.mass_per_point)
                 row.append(point_mass)
             

@@ -142,7 +142,7 @@ class Scene3D:
             self.clock.tick(60)
         
         pygame.quit()
-
+ 
 if __name__ == "__main__":
     scene = Scene3D(1920, 1080)
     scene.run()
