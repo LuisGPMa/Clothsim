@@ -1,4 +1,6 @@
 import pygame
+from OpenGL.GL import *
+from OpenGL.GLU import *
 import numpy as np
 from Entities import *
 
@@ -7,36 +9,59 @@ class Scene3D:
         pygame.init()
         self.width = width
         self.height = height
-        self.screen = pygame.display.set_mode((width, height))
+        self.screen = pygame.display.set_mode((width, height), pygame.OPENGL | pygame.DOUBLEBUF)
         self.ground_height = 0  # Ground level for collision
+        self.system_energy = 0.0
         pygame.display.set_caption("3D Point Mass Simulation")
         self.clock = pygame.time.Clock()
         
         # Camera settings
-        self.camera_pos = np.array([0.0, 0.0, -10.0])
-        self.camera_rotation = 0
-          # Create a cloth
-        self.cloth = Cloth(width=20, length=20, resolution_x=20, resolution_y=20,
-                          mass_per_point=0.1, spring_stiffness=200.0, spring_damping=-.1)
-        
-        # Pin the top edge of the cloth to simulate hanging
-        self.cloth.pin_top_edge()
-        
-        # Position the cloth in the scene (move it up)
-        self.cloth.translate(0, 3.0, 0)
-        
+        self.camera_pos = np.array([0.0, 0.0, 100.0])
+        self.camera_pitch = 0.0  # Rotation around X axis
+        self.camera_yaw = 0.0    # Rotation around Y axis
+        self.camera_roll = 0.0   # Rotation around Z axis
+        self.paused = True
         # Gravity
-        self.gravity = np.array([0.0, 9.81, 0.0])
+        self.gravity = np.array([0.0, -9.81, 0.0])
     
+    def spawn_cloth(self, cloth: Cloth, position:np.ndarray, pin_top=True):
+        """Spawn a cloth in the scene"""
+        self.cloth: Cloth = cloth
+        self.cloth.translate(position)
+        if pin_top:
+            self.cloth.pin_top_edge()
+        print("Cloth spawned. Num points:", len(self.cloth.get_all_point_masses()))
+    
+    def play_pause(self):
+        """Toggle pause state"""
+        self.paused = not self.paused
+        if self.paused:
+            print("Simulation paused")
+        else:
+            print("Simulation running")
+
     def handle_input(self):
         """Handle keyboard input for camera movement"""
         keys = pygame.key.get_pressed()
         camera_speed = 0.2
-        
+        # Camera rotation controls
+        if keys[pygame.K_LEFT]:
+            self.camera_yaw -= 1.0
+        if keys[pygame.K_RIGHT]:
+            self.camera_yaw += 1.0
+        if keys[pygame.K_UP]:
+            self.camera_pitch -= 1.0            
+        if keys[pygame.K_DOWN]:            
+            self.camera_pitch += 1.0
+        # if keys[pygame.K_q]:
+        #     self.camera_roll += 1.0
+        # if keys[pygame.K_e]:
+        #     self.camera_roll -= 1.0
+        #camera movement keys
         if keys[pygame.K_w]:  # Move forward
-            self.camera_pos[2] += camera_speed
-        if keys[pygame.K_s]:  # Move backward
             self.camera_pos[2] -= camera_speed
+        if keys[pygame.K_s]:  # Move backward
+            self.camera_pos[2] += camera_speed
         if keys[pygame.K_a]:  # Move left
             self.camera_pos[0] -= camera_speed
         if keys[pygame.K_d]:  # Move right
@@ -60,34 +85,48 @@ class Scene3D:
                 
             # Apply gravity
             point_mass.apply_force(self.gravity * point_mass.mass)
-            
-            # Simple ground collision
-            if point_mass.position[1] < self.ground_height:
-                point_mass.position[1] = self.ground_height
-                point_mass.velocity[1] = -point_mass.velocity[1] * 0.8  # Bounce with damping
-            
             point_mass.update(dt)
     
-    def render(self):
-        """Render the 3D scene"""
-        self.screen.fill((0, 0, 0))  # Clear screen with black
-        
-        # Draw coordinate system (optional)
-        # self.draw_coordinate_system()
-        
-        # Draw point masses
-        for point_mass in self.cloth.get_all_point_masses():
-            x_2d, y_2d, depth = point_mass.project_3d_to_2d(
-                self.camera_pos, self.width, self.height
-            )
+    
             
-            # Only draw if in front of camera and on screen
-            if depth > 0 and 0 <= x_2d < self.width and 0 <= y_2d < self.height:
-                # Adjust size based on distance
-                size = max(1, int(point_mass.radius * 10 / depth))
-                pygame.draw.circle(self.screen, point_mass.color, (x_2d, y_2d), size)
+    
+    def render(self):
+        """Render the 3D scene using OpenGL"""
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        glEnable(GL_DEPTH_TEST)
+        glPointSize(5)
+        glMatrixMode(GL_PROJECTION)
+        glLoadIdentity()
+        gluPerspective(60, self.width / self.height, 0.1, 1000.0)
+        glMatrixMode(GL_MODELVIEW)
+        glLoadIdentity()
+        # Apply camera rotations: roll (Z), pitch (X), yaw (Y)
+        glRotatef(self.camera_roll, 0, 0, 1)
+        glRotatef(self.camera_pitch, 1, 0, 0)
+        glRotatef(self.camera_yaw, 0, 1, 0)
+        glTranslatef(-self.camera_pos[0], -self.camera_pos[1], -self.camera_pos[2])
         
+        points = self.cloth.get_all_point_masses()
+        springs = self.cloth.get_all_springs()  
+              
+        # Draw point masses        
+        glBegin(GL_POINTS)
+        for point_mass in points:
+            glColor3ub(*point_mass.color)
+            glVertex3f(*point_mass.position)
+        glEnd()
+
+        # Draw springs
+        glBegin(GL_LINES)
+        for spring in springs:
+            glColor3ub(100, 100, 255)
+            glVertex3f(*spring.point_a.position)
+            glVertex3f(*spring.point_b.position)
+        glEnd()
+
         pygame.display.flip()
+        fps = self.clock.get_fps()
+        print(f"FPS: {fps:.2f}")
     
     def draw_coordinate_system(self):
         """Draw simple coordinate system for reference"""
@@ -119,10 +158,16 @@ class Scene3D:
                            (start_2d[0], start_2d[1]), 
                            (end_2d[0], end_2d[1]), 2)
     
-    def run(self):
+    def run(self, fps=60):
         """Main game loop"""
+        # OpenGL setup
+        glEnable(GL_POINT_SMOOTH)
+        glEnable(GL_BLEND)
+        glEnable(GL_PROGRAM_POINT_SIZE)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glClearColor(0, 0, 0, 1)
         running = True
-        dt = 0.016  # ~60 FPS
+        dt = 1 / fps
         
         while running:
             for event in pygame.event.get():
@@ -130,19 +175,18 @@ class Scene3D:
                     running = False
                 elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_SPACE:
-                        pass  
-                        # Reset point mass position
-                        # if self.point_masses:
-                        #     self.point_masses[0].position = np.array([0.0, 2.0, 0.0])
-                        #     self.point_masses[0].velocity.fill(0)
-            
+                        self.play_pause()
             self.handle_input()
-            self.update_physics(dt)
+            if not self.paused:
+                self.update_physics(dt)
             self.render()
-            self.clock.tick(60)
+            self.clock.tick(fps)
         
         pygame.quit()
- 
+
 if __name__ == "__main__":
     scene = Scene3D(1920, 1080)
+    cloth = Cloth(width=20, length=20, resolution_x=20, resolution_y=20,
+              mass_per_point=0.1, spring_stiffness=200.0, spring_damping=-.1)
+    scene.spawn_cloth(cloth, position=np.array([0, 10, 0]))
     scene.run()

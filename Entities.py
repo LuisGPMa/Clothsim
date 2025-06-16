@@ -26,8 +26,8 @@ class PointMass:
         rel_pos = self.position - camera_pos
         
         # Avoid division by zero
-        if rel_pos[2] <= 0.1:
-            rel_pos[2] = 0.1
+        if rel_pos[2] <= 0.01:
+            rel_pos[2] = 0.01
         
         # Perspective projection
         fov_rad = math.radians(fov)
@@ -97,6 +97,7 @@ class Cloth:
         self.mass_per_point = mass_per_point
         self.spring_stiffness = spring_stiffness
         self.spring_damping = spring_damping
+        self.total_energy = 0.0
         # Grid of point masses
         self.point_masses = []
         self.springs = []
@@ -172,6 +173,22 @@ class Cloth:
         """Get a list of all springs in the cloth"""
         return self.springs
     
+    def calculate_total_energy(self):
+        points = self.get_all_point_masses()
+        springs = self.get_all_springs()
+        for i, point in enumerate(points):
+            # Calculate kinetic energy
+            kinetic_energy = 0.5 * point.mass * np.linalg.norm(point.velocity) ** 2 
+            # Calculate potential energy from springs
+            potential_energy = 0.0
+            for j, spring in enumerate(springs):
+                if spring.point_a == point or spring.point_b == point:
+                    # Calculate spring potential energy
+                    rest_length = spring.rest_length
+                    current_length = np.linalg.norm(spring.point_a.position - spring.point_b.position)
+                    potential_energy += 0.5 * spring.stiffness * (current_length - rest_length) ** 2
+                
+                
     def pin_point(self, i, j):
         """Pin a specific point mass so it doesn't move (useful for hanging cloth)"""
         if 0 <= i < self.resolution_x and 0 <= j < self.resolution_y:
@@ -192,15 +209,69 @@ class Cloth:
         self.pin_point(0, self.resolution_y - 1)  # Bottom-left
         self.pin_point(self.resolution_x - 1, self.resolution_y - 1)  # Bottom-right
     
-    def translate(self, x, y, z):
-        """Translate all point masses in the cloth by (x, y, z)."""
-        offset = np.array([x, y, z], dtype=float)
+    # def translate(self, x, y, z):
+    #     """Translate all point masses in the cloth by (x, y, z)."""
+    #     offset = np.array([x, y, z], dtype=float)
+    #     for row in self.point_masses:
+    #         for point in row:
+    #             point.position += offset
+    #             # If the point is pinned, update its pinned position as well
+    #             if hasattr(point, 'pinned') and point.pinned:
+    #                 point.pinned_position += offset
+    
+    def translate(self, offsetArray: np.ndarray):
+        """Translate all point masses in the cloth by a 3 dimensional position offset array."""
         for row in self.point_masses:
             for point in row:
-                point.position += offset
+                point.position += offsetArray
                 # If the point is pinned, update its pinned position as well
                 if hasattr(point, 'pinned') and point.pinned:
-                    point.pinned_position += offset
+                    point.pinned_position += offsetArray
+    
+    def rotate(self, x, y, z):
+        """
+        Rotate the cloth around its center by x, y, z radians (Euler angles).
+        Args:
+            x: Rotation angle around X axis (pitch)
+            y: Rotation angle around Y axis (yaw)
+            z: Rotation angle around Z axis (roll)
+        """
+        # Compute center of the cloth
+        center = np.array([0.0, 0.0, 0.0])
+        count = 0
+        for row in self.point_masses:
+            for point in row:
+                center += point.position
+                count += 1
+        center /= count
+    
+        # Rotation matrices
+        Rx = np.array([
+            [1, 0, 0],
+            [0, np.cos(x), -np.sin(x)],
+            [0, np.sin(x), np.cos(x)]
+        ])
+        Ry = np.array([
+            [np.cos(y), 0, np.sin(y)],
+            [0, 1, 0],
+            [-np.sin(y), 0, np.cos(y)]
+        ])
+        Rz = np.array([
+            [np.cos(z), -np.sin(z), 0],
+            [np.sin(z), np.cos(z), 0],
+            [0, 0, 1]
+        ])
+        # Combined rotation: R = Rz * Ry * Rx
+        R = Rz @ Ry @ Rx
+    
+        for row in self.point_masses:
+            for point in row:
+                rel_pos = point.position - center
+                point.position = center + R @ rel_pos
+                # If pinned, rotate pinned position as well
+                if hasattr(point, 'pinned') and point.pinned:
+                    rel_pinned = point.pinned_position - center
+                    point.pinned_position = center + R @ rel_pinned
     
     def apply_wind_force(self, wind_vector):
         """Apply wind force to all point masses"""
@@ -208,3 +279,104 @@ class Cloth:
             for point in row:
                 if not hasattr(point, 'pinned') or not point.pinned:
                     point.apply_force(wind_vector)
+
+#Implementing Stability Control Based on the Referenced Section
+The paper describes a localized energy redistribution approach to prevent numerical instability. Here's how you could implement this technique:
+
+1. Monitor Local Mechanical Energy
+// Calculate local mechanical energy for each particle and its connected elements
+void ClothSimulator::calculateLocalEnergy() {
+    for (int i = 0; i < particles.size(); i++) {
+        Particle& p = particles[i];
+        
+        // Calculate kinetic energy: 1/2 * mass * velocity²
+        float kineticEnergy = 0.5f * p.mass * p.velocity.squaredLength();
+        
+        // Calculate potential energy from springs
+        float potentialEnergy = 0.0f;
+        for (Spring& s : springs) {
+            if (s.p1Index == i || s.p2Index == i) {
+                float deformation = s.currentLength - s.restLength;
+                potentialEnergy += 0.5f * s.stiffness * deformation * deformation;
+            }
+        }
+        
+        // Store current total energy
+        float currentEnergy = kineticEnergy + potentialEnergy;
+        p.energyVariation = currentEnergy - p.previousEnergy;
+        p.previousEnergy = currentEnergy;
+    }
+}
+2. Detect and Correct Instability
+// Redistribute energy when instability is detected
+void ClothSimulator::stabilityControl(float energyThreshold) {
+    // First pass: identify unstable particles
+    std::vector<int> unstableParticles;
+    for (int i = 0; i < particles.size(); i++) {
+        if (particles[i].energyVariation > energyThreshold) {
+            unstableParticles.push_back(i);
+        }
+    }
+    
+    // Second pass: distribute energy to neighborhoods
+    for (int idx : unstableParticles) {
+        Particle& unstableParticle = particles[idx];
+        
+        // Get neighboring particles (those connected by springs)
+        std::vector<int> neighbors;
+        for (Spring& s : springs) {
+            if (s.p1Index == idx) neighbors.push_back(s.p2Index);
+            if (s.p2Index == idx) neighbors.push_back(s.p1Index);
+        }
+        
+        if (neighbors.empty()) continue;
+        
+        // Calculate average velocity to distribute
+        Vector3 averageVelocity = Vector3(0, 0, 0);
+        for (int neighborIdx : neighbors) {
+            averageVelocity += particles[neighborIdx].velocity;
+        }
+        averageVelocity /= neighbors.size();
+        
+        // Blend unstable particle velocity with neighborhood average
+        // The blending factor controls how much energy is redistributed
+        float blendFactor = 0.5f;
+        Vector3 newVelocity = unstableParticle.velocity * (1.0f - blendFactor) + 
+                              averageVelocity * blendFactor;
+        
+        // Apply momentum conservation by distributing the change to neighbors
+        Vector3 momentumChange = unstableParticle.mass * (unstableParticle.velocity - newVelocity);
+        float totalNeighborMass = 0.0f;
+        for (int neighborIdx : neighbors) {
+            totalNeighborMass += particles[neighborIdx].mass;
+        }
+        
+        for (int neighborIdx : neighbors) {
+            Particle& neighbor = particles[neighborIdx];
+            float massRatio = neighbor.mass / totalNeighborMass;
+            neighbor.velocity += momentumChange * massRatio / neighbor.mass;
+        }
+        
+        // Update the unstable particle's velocity
+        unstableParticle.velocity = newVelocity;
+    }
+}
+3. Integrate into Simulation Loop
+void ClothSimulator::update(float deltaTime) {
+    // Apply forces
+    applyForces(deltaTime);
+    
+    // Integration step
+    integrate(deltaTime);
+    
+    // Calculate local energy variations
+    calculateLocalEnergy();
+    
+    // Apply stability control
+    stabilityControl(energyThresholdValue);
+    
+    // Collision handling and constraints
+    handleCollisions();
+    satisfyConstraints();
+}
+This approach should help prevent numerical explosions by detecting when local energy starts to build up too quickly and redistributing it to neighboring particles, which helps to smooth out the disturbance across the cloth rather than allowing it to accumulate in one area.
