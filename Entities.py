@@ -1,5 +1,7 @@
 import math
 import numpy as np
+import scipy.sparse as sp
+from scipy.sparse.linalg import spsolve
 
 class PointMass:
     def __init__(self, x, y, z, mass=1.0):
@@ -8,7 +10,7 @@ class PointMass:
         self.acceleration = np.array([0.0, 0.0, 0.0], dtype=float)
         self.mass = mass
         self.color = (255, 255, 255)
-        self.radius = 5
+        self.radius = 2 # Visual representation radius
     
     def apply_force(self, force):
         """Apply force to the point mass (F = ma)"""
@@ -18,6 +20,7 @@ class PointMass:
         """Update position and velocity using Verlet integration"""
         self.velocity += self.acceleration * dt
         self.position += self.velocity * dt
+        
         self.acceleration.fill(0)  # Reset acceleration
     
     def project_3d_to_2d(self, camera_pos, screen_width, screen_height, fov=60):
@@ -97,11 +100,12 @@ class Cloth:
         self.mass_per_point = mass_per_point
         self.spring_stiffness = spring_stiffness
         self.spring_damping = spring_damping
-        self.total_energy = 0.0
         # Grid of point masses
         self.point_masses = []
         self.springs = []
-        
+        # Flat list of points and mapping for matrix assembly
+        self.flat_points = []
+        self.point_map = {}
         # Calculate spacing between points
         self.dx = width / (resolution_x - 1) if resolution_x > 1 else 0
         self.dz = length / (resolution_y - 1) if resolution_y > 1 else 0
@@ -110,8 +114,11 @@ class Cloth:
         self._create_springs()
     
     def _create_point_masses(self):
-        """Create a grid of point masses"""
+        """Create a grid of point masses and the flat list/map."""
         self.point_masses = []
+        self.flat_points = []
+        self.point_map = {}
+        idx = 0
         
         for j in range(self.resolution_y):
             row = []
@@ -124,6 +131,10 @@ class Cloth:
                 # Create point mass 
                 point_mass = PointMass(x, y, z, self.mass_per_point)
                 row.append(point_mass)
+
+                self.flat_points.append(point_mass)
+                self.point_map[point_mass] = idx
+                idx += 1
             
             self.point_masses.append(row)
     
@@ -167,27 +178,11 @@ class Cloth:
         all_points = []
         for row in self.point_masses:
             all_points.extend(row)
-        return all_points
+        return all_points    
     
-    def get_all_springs(self):
+    def get_all_springs(self): 
         """Get a list of all springs in the cloth"""
-        return self.springs
-    
-    def calculate_total_energy(self):
-        points = self.get_all_point_masses()
-        springs = self.get_all_springs()
-        for i, point in enumerate(points):
-            # Calculate kinetic energy
-            kinetic_energy = 0.5 * point.mass * np.linalg.norm(point.velocity) ** 2 
-            # Calculate potential energy from springs
-            potential_energy = 0.0
-            for j, spring in enumerate(springs):
-                if spring.point_a == point or spring.point_b == point:
-                    # Calculate spring potential energy
-                    rest_length = spring.rest_length
-                    current_length = np.linalg.norm(spring.point_a.position - spring.point_b.position)
-                    potential_energy += 0.5 * spring.stiffness * (current_length - rest_length) ** 2
-                
+        return self.springs                
                 
     def pin_point(self, i, j):
         """Pin a specific point mass so it doesn't move (useful for hanging cloth)"""
@@ -278,105 +273,165 @@ class Cloth:
         for row in self.point_masses:
             for point in row:
                 if not hasattr(point, 'pinned') or not point.pinned:
-                    point.apply_force(wind_vector)
+                    point.velocity += wind_vector * 0.01 
+                    
+class SolidObject:
+    def __init__(self, position, velocity=None):
+        self.position = np.array(position, dtype=float)
+        self.velocity = np.array(velocity if velocity else [0.0, 0.0, 0.0], dtype=float)
+        self.color = (255, 255, 255)
+    
+    def check_collision(self, point_mass):
+        """Check if a point mass is colliding with this object"""
+        raise NotImplementedError("Subclasses must implement collision detection")
+    
+    def resolve_collision(self, point_mass):
+        """Resolve collision with a point mass"""
+        raise NotImplementedError("Subclasses must implement collision resolution")
+    
+    def update(self, dt):
+        """Update object position (for moving objects)"""
+        self.position += self.velocity * dt
 
-#Implementing Stability Control Based on the Referenced Section
-The paper describes a localized energy redistribution approach to prevent numerical instability. Here's how you could implement this technique:
+class Sphere(SolidObject):
+    def __init__(self, position, radius, velocity=None, restitution=0.8, friction=0.1):
+        super().__init__(position, velocity)
+        self.radius = radius
+        self.restitution = restitution  # Bounciness (0 = no bounce, 1 = perfect bounce)
+        self.friction = friction
+        self.color = (255, 100, 100)  # Red color for visibility
+    
+    def check_collision(self, point_mass):
+        """Check if point mass is inside or touching the sphere"""
+        distance_vector = point_mass.position - self.position
+        distance = np.linalg.norm(distance_vector)
+        return distance <= self.radius
+    
+    def resolve_collision(self, point_mass):
+        """Push point mass out of sphere and apply collision response"""
+        distance_vector = point_mass.position - self.position
+        distance = np.linalg.norm(distance_vector)
+        
+        if distance <= self.radius and distance > 0:
+            # Normalize the distance vector to get collision normal
+            normal = distance_vector / distance
+            
+            # Push point mass to surface of sphere
+            penetration_depth = self.radius - distance
+            point_mass.position = self.position + normal * self.radius
+            
+            # Calculate relative velocity
+            relative_velocity = point_mass.velocity - self.velocity
+            velocity_along_normal = np.dot(relative_velocity, normal)
+            
+            # Don't resolve if velocities are separating
+            if velocity_along_normal > 0:
+                return
+            
+            # Calculate restitution
+            impulse_scalar = -(1 + self.restitution) * velocity_along_normal
+            impulse = impulse_scalar * normal
+            
+            # Apply impulse (assuming infinite mass for sphere)
+            point_mass.velocity += impulse
+            
+            # Apply friction
+            tangent_velocity = relative_velocity - velocity_along_normal * normal
+            if np.linalg.norm(tangent_velocity) > 0:
+                friction_impulse = -self.friction * np.linalg.norm(impulse) * (tangent_velocity / np.linalg.norm(tangent_velocity))
+                point_mass.velocity += friction_impulse
 
-1. Monitor Local Mechanical Energy
-// Calculate local mechanical energy for each particle and its connected elements
-void ClothSimulator::calculateLocalEnergy() {
-    for (int i = 0; i < particles.size(); i++) {
-        Particle& p = particles[i];
-        
-        // Calculate kinetic energy: 1/2 * mass * velocity²
-        float kineticEnergy = 0.5f * p.mass * p.velocity.squaredLength();
-        
-        // Calculate potential energy from springs
-        float potentialEnergy = 0.0f;
-        for (Spring& s : springs) {
-            if (s.p1Index == i || s.p2Index == i) {
-                float deformation = s.currentLength - s.restLength;
-                potentialEnergy += 0.5f * s.stiffness * deformation * deformation;
-            }
-        }
-        
-        // Store current total energy
-        float currentEnergy = kineticEnergy + potentialEnergy;
-        p.energyVariation = currentEnergy - p.previousEnergy;
-        p.previousEnergy = currentEnergy;
-    }
-}
-2. Detect and Correct Instability
-// Redistribute energy when instability is detected
-void ClothSimulator::stabilityControl(float energyThreshold) {
-    // First pass: identify unstable particles
-    std::vector<int> unstableParticles;
-    for (int i = 0; i < particles.size(); i++) {
-        if (particles[i].energyVariation > energyThreshold) {
-            unstableParticles.push_back(i);
-        }
-    }
+class Plane(SolidObject):
+    def __init__(self, position, normal, restitution=0.3, friction=0.2):
+        super().__init__(position)
+        self.normal = np.array(normal, dtype=float)
+        self.normal = self.normal / np.linalg.norm(self.normal)  # Normalize
+        self.restitution = restitution
+        self.friction = friction
+        self.color = (100, 255, 100)  # Green color
     
-    // Second pass: distribute energy to neighborhoods
-    for (int idx : unstableParticles) {
-        Particle& unstableParticle = particles[idx];
-        
-        // Get neighboring particles (those connected by springs)
-        std::vector<int> neighbors;
-        for (Spring& s : springs) {
-            if (s.p1Index == idx) neighbors.push_back(s.p2Index);
-            if (s.p2Index == idx) neighbors.push_back(s.p1Index);
-        }
-        
-        if (neighbors.empty()) continue;
-        
-        // Calculate average velocity to distribute
-        Vector3 averageVelocity = Vector3(0, 0, 0);
-        for (int neighborIdx : neighbors) {
-            averageVelocity += particles[neighborIdx].velocity;
-        }
-        averageVelocity /= neighbors.size();
-        
-        // Blend unstable particle velocity with neighborhood average
-        // The blending factor controls how much energy is redistributed
-        float blendFactor = 0.5f;
-        Vector3 newVelocity = unstableParticle.velocity * (1.0f - blendFactor) + 
-                              averageVelocity * blendFactor;
-        
-        // Apply momentum conservation by distributing the change to neighbors
-        Vector3 momentumChange = unstableParticle.mass * (unstableParticle.velocity - newVelocity);
-        float totalNeighborMass = 0.0f;
-        for (int neighborIdx : neighbors) {
-            totalNeighborMass += particles[neighborIdx].mass;
-        }
-        
-        for (int neighborIdx : neighbors) {
-            Particle& neighbor = particles[neighborIdx];
-            float massRatio = neighbor.mass / totalNeighborMass;
-            neighbor.velocity += momentumChange * massRatio / neighbor.mass;
-        }
-        
-        // Update the unstable particle's velocity
-        unstableParticle.velocity = newVelocity;
-    }
-}
-3. Integrate into Simulation Loop
-void ClothSimulator::update(float deltaTime) {
-    // Apply forces
-    applyForces(deltaTime);
+    def check_collision(self, point_mass):
+        """Check if point mass is below/behind the plane"""
+        to_point = point_mass.position - self.position
+        distance_to_plane = np.dot(to_point, self.normal)
+        return distance_to_plane <= 0
     
-    // Integration step
-    integrate(deltaTime);
+    def resolve_collision(self, point_mass):
+        """Push point mass above plane and apply collision response"""
+        to_point = point_mass.position - self.position
+        distance_to_plane = np.dot(to_point, self.normal)
+        
+        if distance_to_plane <= 0:
+            # Push point mass to plane surface
+            point_mass.position = point_mass.position - distance_to_plane * self.normal
+            
+            # Calculate relative velocity
+            velocity_along_normal = np.dot(point_mass.velocity, self.normal)
+            
+            # Don't resolve if velocity is away from plane
+            if velocity_along_normal > 0:
+                return
+            
+            # Apply restitution
+            normal_velocity = velocity_along_normal * self.normal
+            tangent_velocity = point_mass.velocity - normal_velocity
+            
+            # New velocity after collision
+            point_mass.velocity = tangent_velocity - self.restitution * normal_velocity
+            
+            # Apply friction
+            if np.linalg.norm(tangent_velocity) > 0:
+                friction_force = -self.friction * tangent_velocity
+                point_mass.velocity += friction_force
+
+class Box(SolidObject):
+    def __init__(self, position, dimensions, velocity=None, restitution=0.5, friction=0.15):
+        super().__init__(position, velocity)
+        self.dimensions = np.array(dimensions, dtype=float)  # [width, height, depth]
+        self.restitution = restitution
+        self.friction = friction
+        self.color = (100, 100, 255)  # Blue color
     
-    // Calculate local energy variations
-    calculateLocalEnergy();
+    def check_collision(self, point_mass):
+        """Check if point mass is inside the box"""
+        rel_pos = point_mass.position - self.position
+        half_dims = self.dimensions / 2
+        
+        return (abs(rel_pos[0]) <= half_dims[0] and 
+                abs(rel_pos[1]) <= half_dims[1] and 
+                abs(rel_pos[2]) <= half_dims[2])
     
-    // Apply stability control
-    stabilityControl(energyThresholdValue);
-    
-    // Collision handling and constraints
-    handleCollisions();
-    satisfyConstraints();
-}
-This approach should help prevent numerical explosions by detecting when local energy starts to build up too quickly and redistributing it to neighboring particles, which helps to smooth out the disturbance across the cloth rather than allowing it to accumulate in one area.
+    def resolve_collision(self, point_mass):
+        """Push point mass out of box along shortest path"""
+        rel_pos = point_mass.position - self.position
+        half_dims = self.dimensions / 2
+        
+        if self.check_collision(point_mass):
+            # Find the axis with minimum penetration
+            penetrations = half_dims - np.abs(rel_pos)
+            min_axis = np.argmin(penetrations)
+            
+            # Push out along the axis with minimum penetration
+            push_direction = np.zeros(3)
+            push_direction[min_axis] = 1.0 if rel_pos[min_axis] >= 0 else -1.0
+            
+            # Move point mass to surface
+            point_mass.position = self.position + np.sign(rel_pos) * half_dims
+            point_mass.position[min_axis] = self.position[min_axis] + push_direction[min_axis] * half_dims[min_axis]
+            
+            # Apply collision response along the normal
+            normal = push_direction
+            relative_velocity = point_mass.velocity - self.velocity
+            velocity_along_normal = np.dot(relative_velocity, normal)
+            
+            if velocity_along_normal < 0:  # Moving into the surface
+                # Apply restitution
+                impulse = -(1 + self.restitution) * velocity_along_normal * normal
+                point_mass.velocity += impulse
+                
+                # Apply friction
+                tangent_velocity = relative_velocity - velocity_along_normal * normal
+                if np.linalg.norm(tangent_velocity) > 0:
+                    friction_impulse = -self.friction * np.linalg.norm(impulse) * (tangent_velocity / np.linalg.norm(tangent_velocity))
+                    point_mass.velocity += friction_impulse
+

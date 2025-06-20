@@ -23,6 +23,11 @@ class Scene3D:
         self.paused = True
         # Gravity
         self.gravity = np.array([0.0, -9.81, 0.0])
+        
+        # Solid objects in the scene
+        self.solid_objects = []
+        # Cloth objects in the scene
+        self.cloth = None
     
     def spawn_cloth(self, cloth: Cloth, position:np.ndarray, pin_top=True):
         """Spawn a cloth in the scene"""
@@ -31,6 +36,22 @@ class Scene3D:
         if pin_top:
             self.cloth.pin_top_edge()
         print("Cloth spawned. Num points:", len(self.cloth.get_all_point_masses()))
+        
+    def add_solid_object(self, solid_object):
+        """Add a solid object to the scene"""
+        self.solid_objects.append(solid_object)
+        print(f"Added {type(solid_object).__name__} to scene")
+    
+    def handle_collisions(self):
+        """Handle collisions between cloth and solid objects"""
+        for point_mass in self.cloth.get_all_point_masses():
+            # Skip pinned points for collision
+            if hasattr(point_mass, 'pinned') and point_mass.pinned:
+                continue
+                
+            for solid_object in self.solid_objects:
+                if solid_object.check_collision(point_mass):
+                    solid_object.resolve_collision(point_mass)
     
     def play_pause(self):
         """Toggle pause state"""
@@ -73,22 +94,127 @@ class Scene3D:
             
     def update_physics(self, dt):
         """Update physics for all point masses"""
+        max_velocity = 40.0
+        
+        # Update solid objects (for moving objects)
+        for solid_object in self.solid_objects:
+            solid_object.update(dt)
+        
         # Apply spring forces first
         for spring in self.cloth.get_all_springs():
             spring.apply_spring_force()
         
         # Update point masses
         for point_mass in self.cloth.get_all_point_masses():
-            # Skip pinned points - they don't move
+            #Skip pinned points - they don't move
             if hasattr(point_mass, 'pinned') and point_mass.pinned:
-                continue
-                
-            # Apply gravity
+                continue            
+            #Apply gravity
             point_mass.apply_force(self.gravity * point_mass.mass)
-            point_mass.update(dt)
+            point_mass.update(dt)        
+            #Velocity clamping
+            velocity_magnitude = np.linalg.norm(point_mass.velocity)
+            if velocity_magnitude > max_velocity:
+                point_mass.velocity = point_mass.velocity * (max_velocity / velocity_magnitude)
+                
+        
+        # Handle collisions
+        self.handle_collisions()
     
+    def render_solid_objects(self):
+        """Render solid objects in the scene"""
+        for obj in self.solid_objects:
+            if isinstance(obj, Sphere):
+                self.render_sphere(obj)
+            elif isinstance(obj, Plane):
+                self.render_plane(obj)
+            elif isinstance(obj, Box):
+                self.render_box(obj)
     
+    def render_sphere(self, sphere):
+        """Render a sphere using OpenGL"""
+        glPushMatrix()
+        glTranslatef(*sphere.position)
+        glColor3ub(*sphere.color)
+        
+        # Draw sphere as wireframe
+        glBegin(GL_LINE_STRIP)
+        for i in range(20):
+            for j in range(20):
+                theta = 2 * np.pi * i / 20
+                phi = np.pi * j / 20
+                x = sphere.radius * np.sin(phi) * np.cos(theta)
+                y = sphere.radius * np.sin(phi) * np.sin(theta)
+                z = sphere.radius * np.cos(phi)
+                glVertex3f(x, y, z)
+        glEnd()
+        
+        glPopMatrix()
+    
+    def render_plane(self, plane):
+        """Render a plane as a grid"""
+        glColor3ub(*plane.color)
+        
+        # Create a grid on the plane
+        size = 20.0
+        grid_lines = 10
+        
+        # Find two perpendicular vectors to the normal
+        if abs(plane.normal[0]) < 0.9:
+            tangent1 = np.cross(plane.normal, [1, 0, 0])
+        else:
+            tangent1 = np.cross(plane.normal, [0, 1, 0])
+        tangent1 = tangent1 / np.linalg.norm(tangent1)
+        tangent2 = np.cross(plane.normal, tangent1)
+        
+        glBegin(GL_LINES)
+        for i in range(-grid_lines, grid_lines + 1):
+            # Lines in tangent1 direction
+            start = plane.position + tangent1 * (i * size / grid_lines) - tangent2 * size
+            end = plane.position + tangent1 * (i * size / grid_lines) + tangent2 * size
+            glVertex3f(*start)
+            glVertex3f(*end)
             
+            # Lines in tangent2 direction
+            start = plane.position + tangent2 * (i * size / grid_lines) - tangent1 * size
+            end = plane.position + tangent2 * (i * size / grid_lines) + tangent1 * size
+            glVertex3f(*start)
+            glVertex3f(*end)
+        glEnd()
+    
+    def render_box(self, box):
+        """Render a box as wireframe"""
+        glPushMatrix()
+        glTranslatef(*box.position)
+        glColor3ub(*box.color)
+        
+        # Box vertices (relative to center)
+        half_dims = box.dimensions / 2
+        vertices = [
+            [-half_dims[0], -half_dims[1], -half_dims[2]],  # 0
+            [+half_dims[0], -half_dims[1], -half_dims[2]],  # 1
+            [+half_dims[0], +half_dims[1], -half_dims[2]],  # 2
+            [-half_dims[0], +half_dims[1], -half_dims[2]],  # 3
+            [-half_dims[0], -half_dims[1], +half_dims[2]],  # 4
+            [+half_dims[0], -half_dims[1], +half_dims[2]],  # 5
+            [+half_dims[0], +half_dims[1], +half_dims[2]],  # 6
+            [-half_dims[0], +half_dims[1], +half_dims[2]],  # 7
+        ]
+        
+        # Box edges
+        edges = [
+            (0, 1), (1, 2), (2, 3), (3, 0),  # Bottom face
+            (4, 5), (5, 6), (6, 7), (7, 4),  # Top face
+            (0, 4), (1, 5), (2, 6), (3, 7),  # Vertical edges
+        ]
+        
+        glBegin(GL_LINES)
+        for edge in edges:
+            glVertex3f(*vertices[edge[0]])
+            glVertex3f(*vertices[edge[1]])
+        glEnd()
+        
+        glPopMatrix()
     
     def render(self):
         """Render the 3D scene using OpenGL"""
@@ -123,6 +249,9 @@ class Scene3D:
             glVertex3f(*spring.point_a.position)
             glVertex3f(*spring.point_b.position)
         glEnd()
+        
+        # Draw solid objects
+        self.render_solid_objects()
 
         pygame.display.flip()
         fps = self.clock.get_fps()
