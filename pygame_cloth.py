@@ -3,6 +3,9 @@ from OpenGL.GL import *
 from OpenGL.GLU import *
 import numpy as np
 from Entities import *
+from enum import Enum
+
+
 
 class Scene3D:
     def __init__(self, width, height):
@@ -14,6 +17,10 @@ class Scene3D:
         self.system_energy = 0.0
         pygame.display.set_caption("3D Point Mass Simulation")
         self.clock = pygame.time.Clock()
+        
+        # Initialize font for FPS display
+        pygame.font.init()
+        self.font = pygame.font.Font(None, 36)
         
         # Camera settings
         self.camera_pos = np.array([0.0, 0.0, 100.0])
@@ -27,15 +34,17 @@ class Scene3D:
         # Solid objects in the scene
         self.solid_objects = []
         # Cloth objects in the scene
-        self.cloth = None
+        self.cloths = []
     
-    def spawn_cloth(self, cloth: Cloth, position:np.ndarray, pin_top=True):
+    def spawn_cloth(self, cloth: Cloth,position=[0,0,0],pin_top_edge=False, pin_top_corners=False):
         """Spawn a cloth in the scene"""
-        self.cloth: Cloth = cloth
-        self.cloth.translate(position)
-        if pin_top:
-            self.cloth.pin_top_edge()
-        print("Cloth spawned. Num points:", len(self.cloth.get_all_point_masses()))
+        self.cloths.append(cloth)
+        cloth.translate(position)
+        if pin_top_edge:
+            cloth.pin_top_edge()
+        elif pin_top_corners:
+            cloth.pin_top_corners()
+        print("Cloth spawned. Num points:", len(cloth.get_all_point_masses()))
         
     def add_solid_object(self, solid_object):
         """Add a solid object to the scene"""
@@ -44,14 +53,15 @@ class Scene3D:
     
     def handle_collisions(self):
         """Handle collisions between cloth and solid objects"""
-        for point_mass in self.cloth.get_all_point_masses():
-            # Skip pinned points for collision
-            if hasattr(point_mass, 'pinned') and point_mass.pinned:
-                continue
-                
-            for solid_object in self.solid_objects:
-                if solid_object.check_collision(point_mass):
-                    solid_object.resolve_collision(point_mass)
+        for cloth in self.cloths:
+            for point_mass in cloth.get_all_point_masses():
+                # Skip pinned points for collision
+                if hasattr(point_mass, 'pinned') and point_mass.pinned:
+                    continue
+
+                for solid_object in self.solid_objects:
+                    if solid_object.check_collision(point_mass):
+                        solid_object.resolve_collision(point_mass)
     
     def play_pause(self):
         """Toggle pause state"""
@@ -64,21 +74,17 @@ class Scene3D:
     def handle_input(self):
         """Handle keyboard input for camera movement"""
         keys = pygame.key.get_pressed()
-        camera_speed = 0.2
+        camera_speed = 2.5
+        camera_rotation_speed = 2.0
         # Camera rotation controls
         if keys[pygame.K_LEFT]:
-            self.camera_yaw -= 1.0
+            self.camera_yaw -= camera_rotation_speed
         if keys[pygame.K_RIGHT]:
-            self.camera_yaw += 1.0
+            self.camera_yaw += camera_rotation_speed
         if keys[pygame.K_UP]:
-            self.camera_pitch -= 1.0            
+            self.camera_pitch -= camera_rotation_speed            
         if keys[pygame.K_DOWN]:            
-            self.camera_pitch += 1.0
-        # if keys[pygame.K_q]:
-        #     self.camera_roll += 1.0
-        # if keys[pygame.K_e]:
-        #     self.camera_roll -= 1.0
-        #camera movement keys
+            self.camera_pitch += camera_rotation_speed
         if keys[pygame.K_w]:  # Move forward
             self.camera_pos[2] -= camera_speed
         if keys[pygame.K_s]:  # Move backward
@@ -94,29 +100,14 @@ class Scene3D:
             
     def update_physics(self, dt):
         """Update physics for all point masses"""
-        max_velocity = 40.0
+        # max_velocity = 40.0
         
         # Update solid objects (for moving objects)
         for solid_object in self.solid_objects:
             solid_object.update(dt)
         
-        # Apply spring forces first
-        for spring in self.cloth.get_all_springs():
-            spring.apply_spring_force()
-        
-        # Update point masses
-        for point_mass in self.cloth.get_all_point_masses():
-            #Skip pinned points - they don't move
-            if hasattr(point_mass, 'pinned') and point_mass.pinned:
-                continue            
-            #Apply gravity
-            point_mass.apply_force(self.gravity * point_mass.mass)
-            point_mass.update(dt)        
-            #Velocity clamping
-            velocity_magnitude = np.linalg.norm(point_mass.velocity)
-            if velocity_magnitude > max_velocity:
-                point_mass.velocity = point_mass.velocity * (max_velocity / velocity_magnitude)
-                
+        for cloth in self.cloths:
+            cloth.timestep(dt)                
         
         # Handle collisions
         self.handle_collisions()
@@ -232,9 +223,12 @@ class Scene3D:
         glRotatef(self.camera_yaw, 0, 1, 0)
         glTranslatef(-self.camera_pos[0], -self.camera_pos[1], -self.camera_pos[2])
         
-        points = self.cloth.get_all_point_masses()
-        springs = self.cloth.get_all_springs()  
-              
+        points = []
+        springs = []
+        for cloth in self.cloths:
+            points.extend(cloth.get_all_point_masses())
+            springs.extend(cloth.get_all_springs())
+    
         # Draw point masses        
         glBegin(GL_POINTS)
         for point_mass in points:
@@ -245,7 +239,12 @@ class Scene3D:
         # Draw springs
         glBegin(GL_LINES)
         for spring in springs:
-            glColor3ub(100, 100, 255)
+            if spring.type == SpringType.STRUCTURAL:
+                glColor3ub(255, 0, 0)
+            elif spring.type == SpringType.SHEAR:
+                glColor3ub(0, 255, 0)
+            elif spring.type == SpringType.BENDING:
+                glColor3ub(0, 0, 255)
             glVertex3f(*spring.point_a.position)
             glVertex3f(*spring.point_b.position)
         glEnd()
@@ -253,10 +252,39 @@ class Scene3D:
         # Draw solid objects
         self.render_solid_objects()
 
+        # Draw FPS
+        self.draw_fps()
+
         pygame.display.flip()
-        fps = self.clock.get_fps()
-        print(f"FPS: {fps:.2f}")
     
+    def draw_fps(self):
+        """Draw FPS counter on screen"""
+        fps = self.clock.get_fps()
+        
+        # Switch to 2D rendering for text overlay
+        glMatrixMode(GL_PROJECTION)
+        glPushMatrix()
+        glLoadIdentity()
+        glOrtho(0, self.width, self.height, 0, -1, 1)
+        glMatrixMode(GL_MODELVIEW)
+        glPushMatrix()
+        glLoadIdentity()
+        glDisable(GL_DEPTH_TEST)
+        
+        # Create and render FPS text
+        fps_text = f"FPS: {fps:.1f}"
+        text_surface = self.font.render(fps_text, True, (255, 255, 255))
+        text_data = pygame.image.tostring(text_surface, "RGBA", True)
+        glRasterPos2f(10, 30)
+        glDrawPixels(text_surface.get_width(), text_surface.get_height(), GL_RGBA, GL_UNSIGNED_BYTE, text_data)
+        
+        # Restore 3D rendering state
+        glEnable(GL_DEPTH_TEST)
+        glPopMatrix()
+        glMatrixMode(GL_PROJECTION)
+        glPopMatrix()
+        glMatrixMode(GL_MODELVIEW)
+
     def draw_coordinate_system(self):
         """Draw simple coordinate system for reference"""
         origin = np.array([0.0, 0.0, 0.0])
@@ -287,7 +315,7 @@ class Scene3D:
                            (start_2d[0], start_2d[1]), 
                            (end_2d[0], end_2d[1]), 2)
     
-    def run(self, fps=60):
+    def run(self, fps=30):
         """Main game loop"""
         # OpenGL setup
         glEnable(GL_POINT_SMOOTH)
@@ -315,7 +343,7 @@ class Scene3D:
 
 if __name__ == "__main__":
     scene = Scene3D(1920, 1080)
-    cloth = Cloth(width=20, length=20, resolution_x=20, resolution_y=20,
+    cloth = Cloth(width=20, length=20, resolution_x=40, resolution_y=40,
               mass_per_point=0.1, spring_stiffness=200.0, spring_damping=-.1)
     scene.spawn_cloth(cloth, position=np.array([0, 10, 0]))
     scene.run()
