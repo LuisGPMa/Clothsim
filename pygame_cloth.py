@@ -258,8 +258,9 @@ class Scene3D:
         pygame.display.flip()
     
     def draw_fps(self):
-        """Draw FPS counter on screen"""
-        fps = self.clock.get_fps()
+        """Draw frame render time (ms per frame) on screen"""
+        # Calculate ms per frame
+        ms_per_frame = self.clock.get_time()
         
         # Switch to 2D rendering for text overlay
         glMatrixMode(GL_PROJECTION)
@@ -271,9 +272,9 @@ class Scene3D:
         glLoadIdentity()
         glDisable(GL_DEPTH_TEST)
         
-        # Create and render FPS text
-        fps_text = f"FPS: {fps:.1f}"
-        text_surface = self.font.render(fps_text, True, (255, 255, 255))
+        # Create and render ms/frame text
+        ms_text = f"Frame: {ms_per_frame:.1f} ms"
+        text_surface = self.font.render(ms_text, True, (255, 255, 255))
         text_data = pygame.image.tostring(text_surface, "RGBA", True)
         glRasterPos2f(10, 30)
         glDrawPixels(text_surface.get_width(), text_surface.get_height(), GL_RGBA, GL_UNSIGNED_BYTE, text_data)
@@ -315,7 +316,7 @@ class Scene3D:
                            (start_2d[0], start_2d[1]), 
                            (end_2d[0], end_2d[1]), 2)
     
-    def run(self, fps=30):
+    def run(self, dt = 1./30):
         """Main game loop"""
         # OpenGL setup
         glEnable(GL_POINT_SMOOTH)
@@ -324,8 +325,7 @@ class Scene3D:
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         glClearColor(0, 0, 0, 1)
         running = True
-        dt = 1 / fps
-        
+        fps = dt**(-1)
         while running:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
